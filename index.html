@@ -299,8 +299,6 @@ var asLastTs  = null;
 var AS_PPS    = 35; // pixels per second
 
 // TTS
-var ttsChunks  = [];
-var ttsIdx     = 0;
 var ttsGoing   = false;
 var ttsPaused  = false;
 var ttsSpeed   = 1;
@@ -394,7 +392,6 @@ function openBook(slug) {
   stopTTS();
   stopAS();
   userScrolled = false;
-
   document.getElementById('shelf-view').style.display = 'none';
   document.getElementById('reader-view').classList.add('active');
   document.getElementById('reader-title').textContent = book.title;
@@ -420,7 +417,6 @@ function openBook(slug) {
         });
       });
       document.getElementById('bookmark-btn').classList.toggle('active', !!bd.bookmarked);
-      ttsChunks = []; ttsIdx = 0; // reset TTS for new book
     })
     .catch(function(e){
       document.getElementById('md-body').innerHTML =
@@ -668,143 +664,95 @@ function doReset() {
 }
 
 // ─── TTS ──────────────────────────────────────────────────
-// Uses Chrome's built-in speechSynthesis.
-// Reads element by element (paragraph/heading), starts from whatever
-// is currently visible at the top of the reader, scrolls along as it reads.
+// Chrome requires speechSynthesis.speak() to be called from a user gesture.
+// Chained onend callbacks lose that gesture context after the first utterance.
+// Solution: collect ALL text from the current scroll position downward into
+// ONE utterance and speak it all at once. Simple, reliable, no gesture issues.
 
-function getTTSEls() {
-  // All readable text nodes in document order, no nesting
-  return Array.from(document.querySelectorAll(
-    '#md-body h1, #md-body h2, #md-body h3, #md-body h4,' +
-    '#md-body p, #md-body li, #md-body blockquote'
+function getTextFromCurrentPosition() {
+  var rc   = document.getElementById('reader-content');
+  var rcRect = rc.getBoundingClientRect();
+  var els  = Array.from(document.querySelectorAll(
+    '#md-body h1, #md-body h2, #md-body h3, #md-body p, #md-body li, #md-body blockquote'
   ));
-}
-
-function findVisibleStartIdx(els) {
-  // Find the first el whose bounding rect top is inside (or just below) the visible reader area
-  var rc = document.getElementById('reader-content');
-  var rcTop = rc.getBoundingClientRect().top;
+  // Find first element at or below the top of the visible reader area
+  var startIdx = 0;
   for (var i = 0; i < els.length; i++) {
     var b = els[i].getBoundingClientRect();
-    if (b.bottom > rcTop + 10) return i;
+    if (b.bottom > rcRect.top + 10) { startIdx = i; break; }
   }
-  return 0;
+  // Join all text from startIdx onward
+  var parts = [];
+  for (var j = startIdx; j < els.length; j++) {
+    var t = (els[j].innerText || '').trim();
+    if (t.length > 1) parts.push(t);
+  }
+  return parts.join(' \n');
 }
 
 function toggleTTS() {
-  if (!('speechSynthesis' in window)) { showToast('TTS not supported in this browser'); return; }
-  if (ttsGoing)  { pauseTTS(); return; }
-  if (ttsPaused) { resumeTTS(); return; }
-  startTTS();
-}
-
-function startTTS() {
-  window.speechSynthesis.cancel();
-  ttsChunks = getTTSEls();
-  if (!ttsChunks.length) { showToast('Nothing to read'); return; }
-  ttsIdx    = findVisibleStartIdx(ttsChunks);
-  ttsGoing  = true;
-  ttsPaused = false;
-  updateTTSui();
-  readNext();
-}
-
-function resumeTTS() {
-  if (!ttsChunks.length) { startTTS(); return; }
-  window.speechSynthesis.cancel();
-  ttsGoing  = true;
-  ttsPaused = false;
-  updateTTSui();
-  readNext();
-}
-
-function readNext() {
-  // Skip empties
-  while (ttsIdx < ttsChunks.length) {
-    var t = (ttsChunks[ttsIdx].innerText || '').trim();
-    if (t.length > 1) break;
-    ttsIdx++;
+  if (!('speechSynthesis' in window)) { showToast('TTS not supported'); return; }
+  if (ttsGoing) {
+    // Stop
+    ttsGoing = false; ttsPaused = false;
+    window.speechSynthesis.cancel();
+    document.getElementById('tts-widget').classList.remove('visible');
+    document.getElementById('tts-btn').classList.remove('active');
+    document.getElementById('tts-icon').innerHTML = '<path d="M3 2L12 7L3 12V2Z" fill="white"/>';
+    showToast('Stopped');
+    return;
   }
-  if (!ttsGoing || ttsIdx >= ttsChunks.length) { stopTTS(); return; }
+  // Start — must be called synchronously inside click handler
+  var text = getTextFromCurrentPosition();
+  if (!text.trim()) { showToast('Nothing to read'); return; }
 
-  var el  = ttsChunks[ttsIdx];
-  var txt = (el.innerText || '').trim();
-
-  // Highlight current element
-  document.querySelectorAll('.tts-reading').forEach(function(e){ e.classList.remove('tts-reading'); });
-  el.classList.add('tts-reading');
-
-  // Scroll reading element into view inside the content div (not window)
-  var rc  = document.getElementById('reader-content');
-  var elR = el.getBoundingClientRect();
-  var rcR = rc.getBoundingClientRect();
-  if (elR.bottom > rcR.bottom - 60) {
-    rc.scrollTop += elR.top - rcR.top - 60;
-  }
-
-  // Update progress bar in floating widget
-  document.getElementById('tts-fill').style.width =
-    Math.round(ttsIdx / ttsChunks.length * 100) + '%';
-
-  var utt  = new SpeechSynthesisUtterance(txt);
+  window.speechSynthesis.cancel();
+  var utt  = new SpeechSynthesisUtterance(text);
   utt.rate = ttsSpeed;
   utt.lang = 'en-US';
-
   utt.onend = function() {
-    if (!ttsGoing) return;
-    ttsIdx++;
-    readNext();
+    ttsGoing = false;
+    document.getElementById('tts-widget').classList.remove('visible');
+    document.getElementById('tts-btn').classList.remove('active');
+    document.getElementById('tts-icon').innerHTML = '<path d="M3 2L12 7L3 12V2Z" fill="white"/>';
+    document.getElementById('tts-fill').style.width = '0%';
   };
   utt.onerror = function(ev) {
-    // interrupted/canceled = we called cancel() intentionally, ignore
     if (ev.error === 'interrupted' || ev.error === 'canceled') return;
-    ttsIdx++;
-    readNext();
+    showToast('TTS error: ' + ev.error);
+    ttsGoing = false;
+  };
+  utt.onboundary = function(ev) {
+    if (ev.name !== 'word') return;
+    var pct = utt.text.length > 0 ? Math.round(ev.charIndex / utt.text.length * 100) : 0;
+    document.getElementById('tts-fill').style.width = pct + '%';
   };
 
   window.speechSynthesis.speak(utt);
-}
+  ttsGoing  = true;
+  ttsPaused = false;
 
-function pauseTTS() {
-  ttsGoing = false; ttsPaused = true;
-  window.speechSynthesis.cancel();
-  document.querySelectorAll('.tts-reading').forEach(function(e){ e.classList.remove('tts-reading'); });
-  updateTTSui();
+  // Show widget
+  document.getElementById('tts-widget').classList.add('visible');
+  document.getElementById('tts-btn').classList.add('active');
+  document.getElementById('tts-icon').innerHTML =
+    '<rect x="2" y="2" width="4" height="10" rx="1" fill="white"/><rect x="8" y="2" width="4" height="10" rx="1" fill="white"/>';
+  showToast('Reading from current position');
 }
 
 function stopTTS() {
-  ttsGoing = false; ttsPaused = false; ttsIdx = 0;
+  ttsGoing = false; ttsPaused = false;
   window.speechSynthesis.cancel();
-  document.querySelectorAll('.tts-reading').forEach(function(e){ e.classList.remove('tts-reading'); });
+  document.getElementById('tts-widget').classList.remove('visible');
+  document.getElementById('tts-btn').classList.remove('active');
+  document.getElementById('tts-icon').innerHTML = '<path d="M3 2L12 7L3 12V2Z" fill="white"/>';
   document.getElementById('tts-fill').style.width = '0%';
-  updateTTSui(true);
-}
-
-function updateTTSui(stopped) {
-  var widget = document.getElementById('tts-widget');
-  var btn    = document.getElementById('tts-btn');
-  var icon   = document.getElementById('tts-icon');
-  if (!widget) return;
-  if (stopped) {
-    widget.classList.remove('visible');
-    btn.classList.remove('active');
-    icon.innerHTML = '<path d="M3 2L12 7L3 12V2Z" fill="white"/>';
-    return;
-  }
-  widget.classList.add('visible');
-  btn.classList.toggle('active', ttsGoing);
-  icon.innerHTML = ttsGoing
-    ? '<rect x="2" y="2" width="4" height="10" rx="1" fill="white"/><rect x="8" y="2" width="4" height="10" rx="1" fill="white"/>'
-    : '<path d="M3 2L12 7L3 12V2Z" fill="white"/>';
 }
 
 function seekTTS(e) {
-  if (!ttsChunks.length) return;
-  var bar = document.getElementById('tts-bar');
-  var pct = Math.max(0, Math.min(1, e.offsetX / bar.clientWidth));
-  ttsIdx  = Math.floor(pct * ttsChunks.length);
-  document.getElementById('tts-fill').style.width = Math.round(pct * 100) + '%';
-  if (ttsGoing) { window.speechSynthesis.cancel(); readNext(); }
+  // seeking not meaningful for single utterance — restart from that % position is complex,
+  // so just restart from current scroll position
+  stopTTS(); toggleTTS();
 }
 
 var SPEEDS = [0.75, 1, 1.25, 1.5, 2];
@@ -812,7 +760,8 @@ function cycleSpeed() {
   var i    = SPEEDS.indexOf(ttsSpeed);
   ttsSpeed = SPEEDS[(i + 1) % SPEEDS.length];
   document.getElementById('speed-btn').textContent = ttsSpeed + 'x';
-  if (ttsGoing) { window.speechSynthesis.cancel(); readNext(); }
+  // If playing, restart with new speed
+  if (ttsGoing) { stopTTS(); toggleTTS(); }
   showToast('Speed: ' + ttsSpeed + 'x');
 }
 
